@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 #define MAX_CLIENTS 10
 #define MAX_MSG_LEN 1024
@@ -16,7 +17,10 @@ typedef struct {
 Client clients[MAX_CLIENTS];
 int num_clients = 0;
 
-void handle_client(int client_socket) {
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void *handle_client(void *arg) {
+    int client_socket = *((int *)arg);
     char message[MAX_MSG_LEN];
     ssize_t recv_size;
 
@@ -24,14 +28,17 @@ void handle_client(int client_socket) {
         message[recv_size] = '\0';
 
         // 모든 클라이언트에게 메시지를 브로드캐스트
+        pthread_mutex_lock(&mutex);
         for (int i = 0; i < num_clients; ++i) {
             if (clients[i].socket != client_socket) {
                 send(clients[i].socket, message, strlen(message), 0);
             }
         }
+        pthread_mutex_unlock(&mutex);
     }
 
     // 클라이언트가 연결 해제됨
+    pthread_mutex_lock(&mutex);
     for (int i = 0; i < num_clients; ++i) {
         if (clients[i].socket == client_socket) {
             printf("클라이언트 '%s' 연결 해제됨.\n", clients[i].username);
@@ -44,8 +51,11 @@ void handle_client(int client_socket) {
             break;
         }
     }
+    pthread_mutex_unlock(&mutex);
 
     close(client_socket);
+
+    pthread_exit(NULL);
 }
 
 int main() {
@@ -94,20 +104,23 @@ int main() {
             recv(client_socket, username, sizeof(username), 0);
 
             // 클라이언트를 배열에 추가
+            pthread_mutex_lock(&mutex);
             clients[num_clients].socket = client_socket;
             strcpy(clients[num_clients].username, username);
             num_clients++;
+            pthread_mutex_unlock(&mutex);
 
             printf("클라이언트 '%s' 연결됨.\n", username);
 
-            // 클라이언트를 처리하기 위한 새로운 프로세스 생성
-            pid_t pid = fork();
-            if (pid == 0) {
-                // 자식 프로세스
-                close(server_socket);
-                handle_client(client_socket);
-                exit(EXIT_SUCCESS);
+            // 클라이언트를 처리하기 위한 새로운 쓰레드 생성
+            pthread_t tid;
+            if (pthread_create(&tid, NULL, handle_client, &client_socket) != 0) {
+                perror("클라이언트 핸들링 쓰레드 생성 오류");
+                exit(EXIT_FAILURE);
             }
+
+            // 쓰레드 분리
+            pthread_detach(tid);
         } else {
             // 클라이언트 수가 많아서 연결을 거부함
             char rejection_msg[] = "서버가 가득 찼습니다. 나중에 다시 시도하세요.\n";
